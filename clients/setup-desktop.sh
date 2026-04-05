@@ -6,14 +6,14 @@ set -euo pipefail
 #
 # Что делает:
 #   1. Определяет ОС и устанавливает sing-box
-#   2. Спрашивает данные из VLESS-ссылки
+#   2. Получает данные подключения (интерактивно или из .vpn-params)
 #   3. Генерирует конфиг с TUN (перехват всего трафика)
 #   4. Настраивает автозапуск (launchd на Mac, systemd на Linux)
 #   5. Запускает sing-box
 #
 # Использование:
-#   chmod +x setup-desktop.sh
-#   sudo ./setup-desktop.sh
+#   sudo ./setup-desktop.sh                        # интерактивный ввод
+#   sudo ./setup-desktop.sh --from /tmp/.vpn-params  # из файла параметров
 #===============================================================================
 
 RED='\033[0;31m'
@@ -121,30 +121,61 @@ esac
 log "sing-box: $($SINGBOX_BIN version 2>/dev/null | head -1)"
 
 # =====================================================================
-# 2. СБОР ДАННЫХ
+# 2. ПОЛУЧЕНИЕ ПАРАМЕТРОВ ПОДКЛЮЧЕНИЯ
 # =====================================================================
 
-echo ""
-echo -e "${CYAN}=== Данные из VLESS-ссылки ===${NC}"
-echo ""
+RU_VPS_IP=""
+REALITY_PUBKEY=""
+REALITY_SNI=""
+VLESS_PORT="443"
 
-read -rp "IP российского VPS: " RU_VPS_IP
-[[ -z "$RU_VPS_IP" ]] && err "IP не может быть пустым"
+# Парсим --from аргумент
+PARAMS_FILE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --from) PARAMS_FILE="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
 
-read -rp "UUID: " UUID
-[[ -z "$UUID" ]] && err "UUID не может быть пустым"
+if [[ -n "$PARAMS_FILE" ]]; then
+    [[ ! -f "$PARAMS_FILE" ]] && err "Файл не найден: $PARAMS_FILE"
+    source "$PARAMS_FILE"
+    # Маппинг имён из .vpn-params → локальные переменные
+    RU_VPS_IP="${SERVER_IP:-}"
+    REALITY_PUBKEY="${REALITY_PUBLIC_KEY:-}"
+    REALITY_SNI="${REALITY_DEST:-www.google.com}"
+    # UUID, SHORT_ID уже совпадают по имени
+    log "Параметры загружены из $PARAMS_FILE"
+    log "  VPS: $RU_VPS_IP | SNI: $REALITY_SNI | UUID: ${UUID:0:8}..."
+else
+    echo ""
+    echo -e "${CYAN}=== Данные из VLESS-ссылки ===${NC}"
+    echo ""
 
-read -rp "Reality Public Key: " REALITY_PUBKEY
-[[ -z "$REALITY_PUBKEY" ]] && err "Public Key не может быть пустым"
+    read -rp "IP российского VPS: " RU_VPS_IP
+    [[ -z "$RU_VPS_IP" ]] && err "IP не может быть пустым"
 
-read -rp "Short ID: " SHORT_ID
-[[ -z "$SHORT_ID" ]] && err "Short ID не может быть пустым"
+    read -rp "UUID: " UUID
+    [[ -z "$UUID" ]] && err "UUID не может быть пустым"
 
-read -rp "Сайт маскировки Reality [www.google.com]: " REALITY_SNI
-REALITY_SNI=${REALITY_SNI:-www.google.com}
+    read -rp "Reality Public Key: " REALITY_PUBKEY
+    [[ -z "$REALITY_PUBKEY" ]] && err "Public Key не может быть пустым"
 
-read -rp "Порт VLESS [443]: " VLESS_PORT
-VLESS_PORT=${VLESS_PORT:-443}
+    read -rp "Short ID: " SHORT_ID
+    [[ -z "$SHORT_ID" ]] && err "Short ID не может быть пустым"
+
+    read -rp "Сайт маскировки Reality [www.google.com]: " REALITY_SNI
+    REALITY_SNI=${REALITY_SNI:-www.google.com}
+
+    read -rp "Порт VLESS [443]: " VLESS_PORT
+    VLESS_PORT=${VLESS_PORT:-443}
+fi
+
+[[ -z "$RU_VPS_IP" ]] && err "IP сервера не задан"
+[[ -z "$UUID" ]] && err "UUID не задан"
+[[ -z "$REALITY_PUBKEY" ]] && err "Reality Public Key не задан"
+[[ -z "$SHORT_ID" ]] && err "Short ID не задан"
 
 # =====================================================================
 # 3. КОНФИГ SING-BOX

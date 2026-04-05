@@ -16,10 +16,8 @@
 #   - Данные из VLESS-ссылки (после запуска setup-ru-vps.sh)
 #
 # Использование:
-#   scp setup-keenetic.sh root@<keenetic-ip>:/opt/
-#   ssh root@<keenetic-ip>
-#   chmod +x /opt/setup-keenetic.sh
-#   /opt/setup-keenetic.sh
+#   /opt/setup-keenetic.sh                            # интерактивный ввод
+#   /opt/setup-keenetic.sh --from /opt/.vpn-params    # из файла параметров
 #===============================================================================
 
 set -e
@@ -68,35 +66,64 @@ echo "============================================================"
 echo -e "${NC}"
 
 # =====================================================================
-# 1. СБОР ДАННЫХ
+# 1. ПОЛУЧЕНИЕ ПАРАМЕТРОВ ПОДКЛЮЧЕНИЯ
 # =====================================================================
 
-echo -e "${CYAN}=== Данные из VLESS-ссылки ===${NC}"
-echo ""
+RU_VPS_IP=""
+REALITY_PUBKEY=""
+REALITY_SNI="www.google.com"
+VLESS_PORT="443"
 
-printf "IP российского VPS: "
-read RU_VPS_IP
-[ -z "$RU_VPS_IP" ] && err "IP не может быть пустым"
+# Парсим --from аргумент
+PARAMS_FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --from) PARAMS_FILE="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
 
-printf "UUID: "
-read UUID
-[ -z "$UUID" ] && err "UUID не может быть пустым"
+if [ -n "$PARAMS_FILE" ]; then
+    [ ! -f "$PARAMS_FILE" ] && err "Файл не найден: $PARAMS_FILE"
+    . "$PARAMS_FILE"
+    # Маппинг имён из .vpn-params
+    RU_VPS_IP="${SERVER_IP:-}"
+    REALITY_PUBKEY="${REALITY_PUBLIC_KEY:-}"
+    REALITY_SNI="${REALITY_DEST:-www.google.com}"
+    log "Параметры загружены из $PARAMS_FILE"
+else
+    echo -e "${CYAN}=== Данные из VLESS-ссылки ===${NC}"
+    echo ""
 
-printf "Reality Public Key: "
-read REALITY_PUBKEY
-[ -z "$REALITY_PUBKEY" ] && err "Public Key не может быть пустым"
+    printf "IP российского VPS: "
+    read RU_VPS_IP
+    [ -z "$RU_VPS_IP" ] && err "IP не может быть пустым"
 
-printf "Short ID: "
-read SHORT_ID
-[ -z "$SHORT_ID" ] && err "Short ID не может быть пустым"
+    printf "UUID: "
+    read UUID
+    [ -z "$UUID" ] && err "UUID не может быть пустым"
 
-printf "Сайт маскировки Reality [www.google.com]: "
-read REALITY_SNI
-REALITY_SNI=${REALITY_SNI:-www.google.com}
+    printf "Reality Public Key: "
+    read REALITY_PUBKEY
+    [ -z "$REALITY_PUBKEY" ] && err "Public Key не может быть пустым"
 
-printf "Порт VLESS [443]: "
-read VLESS_PORT
-VLESS_PORT=${VLESS_PORT:-443}
+    printf "Short ID: "
+    read SHORT_ID
+    [ -z "$SHORT_ID" ] && err "Short ID не может быть пустым"
+
+    printf "Сайт маскировки Reality [www.google.com]: "
+    read REALITY_SNI
+    REALITY_SNI=${REALITY_SNI:-www.google.com}
+
+    printf "Порт VLESS [443]: "
+    read VLESS_PORT
+    VLESS_PORT=${VLESS_PORT:-443}
+fi
+
+[ -z "$RU_VPS_IP" ] && err "IP сервера не задан"
+[ -z "$UUID" ] && err "UUID не задан"
+[ -z "$REALITY_PUBKEY" ] && err "Reality Public Key не задан"
+[ -z "$SHORT_ID" ] && err "Short ID не задан"
 
 # =====================================================================
 # 2. УСТАНОВКА ЗАВИСИМОСТЕЙ

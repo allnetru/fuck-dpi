@@ -100,23 +100,31 @@ sudo wg-quick save wg0
 
 ### 4. Клиент
 
+Скопируйте файл параметров с RU VPS:
+
+```bash
+scp root@<ru-vps-ip>:/root/.vpn-params /tmp/
+```
+
 **Mac / Ubuntu / Debian:**
 ```bash
 chmod +x clients/setup-desktop.sh
-sudo ./clients/setup-desktop.sh
+sudo ./clients/setup-desktop.sh --from /tmp/.vpn-params
 ```
 
 **Keenetic** (с установленным Entware/OPKG):
 ```bash
+scp /tmp/.vpn-params root@<router-ip>:/opt/
 scp clients/setup-keenetic.sh root@<router-ip>:/opt/
-ssh root@<router-ip> '/opt/setup-keenetic.sh'
+ssh root@<router-ip> '/opt/setup-keenetic.sh --from /opt/.vpn-params'
 ```
 Управление: `/opt/etc/init.d/S99singbox start|stop|restart`
 
 **OpenWrt** (19.07+ iptables, 22.03+ nftables):
 ```bash
+scp /tmp/.vpn-params root@<router-ip>:/tmp/
 scp clients/setup-openwrt.sh root@<router-ip>:/tmp/
-ssh root@<router-ip> '/tmp/setup-openwrt.sh'
+ssh root@<router-ip> '/tmp/setup-openwrt.sh --from /tmp/.vpn-params'
 ```
 Управление: `/etc/init.d/sing-box start|stop|restart`
 
@@ -124,7 +132,7 @@ ssh root@<router-ip> '/tmp/setup-openwrt.sh'
 
 **Android:** v2rayNG — импорт VLESS-ссылки.
 
-Каждый скрипт спросит данные из VLESS-ссылки и настроит всё автоматически.
+Все клиентские скрипты также работают интерактивно (без `--from`) — спросят данные из VLESS-ссылки.
 
 ## Проверка
 
