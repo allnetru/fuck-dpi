@@ -52,6 +52,7 @@ read -rp "Public Key WireGuard зарубежного VPS: " FOREIGN_WG_PUBKEY
 read -rp "Ваш IP в WG-сети [10.0.0.2]: " WG_CLIENT_IP
 WG_CLIENT_IP=${WG_CLIENT_IP:-10.0.0.2}
 
+echo -e "${YELLOW}Совет: запустите ./find-reality-domain.sh чтобы найти домен в вашем AS${NC}"
 read -rp "Сайт для маскировки Reality [www.google.com]: " REALITY_DEST
 REALITY_DEST=${REALITY_DEST:-www.google.com}
 
