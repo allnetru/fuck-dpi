@@ -64,119 +64,14 @@ sudo wg set wg0 peer <WG_PUBLIC_KEY_ОТ_RU_VPS> allowed-ips 10.0.0.2/32
 sudo wg-quick save wg0
 ```
 
-### Шаг 4: Клиент (Mac)
-
-Установите sing-box:
+### Шаг 4: Клиент (Mac / Ubuntu / Debian)
 
 ```bash
-brew install sing-box
+chmod +x clients/setup-desktop.sh
+sudo ./clients/setup-desktop.sh
 ```
 
-Создайте конфиг `/usr/local/etc/sing-box/config.json`:
-
-```json
-{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "dns": {
-    "servers": [
-      {
-        "type": "https",
-        "tag": "cloudflare-doh",
-        "server": "1.1.1.1"
-      }
-    ],
-    "final": "cloudflare-doh",
-    "strategy": "ipv4_only"
-  },
-  "inbounds": [
-    {
-      "type": "tun",
-      "tag": "tun-in",
-      "interface_name": "utun99",
-      "mtu": 1500,
-      "address": ["172.19.0.1/30"],
-      "auto_route": true,
-      "strict_route": true,
-      "stack": "system"
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-out",
-      "server": "<IP_РОССИЙСКОГО_VPS>",
-      "server_port": 443,
-      "uuid": "<UUID>",
-      "flow": "xtls-rprx-vision",
-      "network": "tcp",
-      "tls": {
-        "enabled": true,
-        "server_name": "www.google.com",
-        "utls": {
-          "enabled": true,
-          "fingerprint": "chrome"
-        },
-        "reality": {
-          "enabled": true,
-          "public_key": "<REALITY_PUBLIC_KEY>",
-          "short_id": "<SHORT_ID>"
-        }
-      }
-    },
-    {
-      "type": "direct",
-      "tag": "direct"
-    },
-    {
-      "type": "block",
-      "tag": "block"
-    }
-  ],
-  "route": {
-    "default_domain_resolver": {
-      "server": "cloudflare-doh"
-    },
-    "rules": [
-      {
-        "action": "sniff"
-      },
-      {
-        "protocol": "dns",
-        "action": "hijack-dns"
-      },
-      {
-        "ip_is_private": true,
-        "action": "route",
-        "outbound": "direct"
-      },
-      {
-        "protocol": "quic",
-        "action": "reject"
-      }
-    ],
-    "auto_detect_interface": true,
-    "final": "vless-out"
-  }
-}
-```
-
-Замените `<IP_РОССИЙСКОГО_VPS>`, `<UUID>`, `<REALITY_PUBLIC_KEY>`, `<SHORT_ID>` значениями из VLESS-ссылки.
-
-Запуск:
-
-```bash
-sudo sing-box run -c /usr/local/etc/sing-box/config.json
-```
-
-Проверка (в другом терминале):
-
-```bash
-curl -4 ifconfig.me
-# Должен показать IP зарубежного VPS
-```
+Скрипт установит sing-box, спросит данные из VLESS-ссылки, создаст конфиг и настроит автозапуск (launchd на Mac, systemd на Linux).
 
 ### Клиент (Keenetic)
 
