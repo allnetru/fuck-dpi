@@ -35,15 +35,15 @@
 
 - **Российский VPS**: Ubuntu 20.04+ / Debian 11+, root, публичный IPv4
 - **Зарубежный VPS**: Ubuntu 20.04+ / Debian 11+, root, публичный IPv4
-- **Клиент**: sing-box (Mac/Linux/Windows), FoXray (iOS/macOS), v2rayNG (Android)
+- **Клиент**: sing-box (Mac/Linux/Windows), FoXray (iOS/macOS), v2rayNG (Android), Keenetic (Entware), OpenWrt
 
 ## Порядок установки
 
 ### Шаг 1: Зарубежный VPS
 
 ```bash
-chmod +x setup-foreign-vps.sh
-sudo ./setup-foreign-vps.sh
+chmod +x servers/setup-foreign-vps.sh
+sudo ./servers/setup-foreign-vps.sh
 ```
 
 Запишите: **IP**, **порт**, **WG Public Key**.
@@ -51,8 +51,8 @@ sudo ./setup-foreign-vps.sh
 ### Шаг 2: Российский VPS
 
 ```bash
-chmod +x setup-ru-vps.sh
-sudo ./setup-ru-vps.sh
+chmod +x servers/setup-ru-vps.sh
+sudo ./servers/setup-ru-vps.sh
 ```
 
 Скрипт спросит данные зарубежного VPS. Выведет **VLESS-ссылку** и **WG Public Key**.
@@ -177,6 +177,32 @@ sudo sing-box run -c /usr/local/etc/sing-box/config.json
 curl -4 ifconfig.me
 # Должен показать IP зарубежного VPS
 ```
+
+### Клиент (Keenetic)
+
+Keenetic с установленным Entware (OPKG).
+
+```bash
+scp clients/setup-keenetic.sh root@<keenetic-ip>:/opt/
+ssh root@<keenetic-ip>
+chmod +x /opt/setup-keenetic.sh && /opt/setup-keenetic.sh
+```
+
+Управление: `/opt/etc/init.d/S99singbox start|stop|restart`
+
+### Клиент (OpenWrt)
+
+OpenWrt 19.07+ (iptables) или 22.03+ (nftables).
+
+```bash
+scp clients/setup-openwrt.sh root@<router-ip>:/tmp/
+ssh root@<router-ip>
+chmod +x /tmp/setup-openwrt.sh && /tmp/setup-openwrt.sh
+```
+
+Управление: `/etc/init.d/sing-box start|stop|restart`
+
+Скрипт автоматически определяет firewall (nftables/iptables) и архитектуру роутера.
 
 ### Клиент (iOS)
 
