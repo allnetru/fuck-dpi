@@ -45,6 +45,7 @@ DPI видит обычный TLS к google.com. Итоговый IP — зар�
 servers/
   setup-foreign-vps.sh    зарубежный VPS — WireGuard exit node
   setup-ru-vps.sh         российский VPS — XRay VLESS/Reality + WireGuard
+  setup-obfuscation.sh    обфускация межсерверного WG в TLS/WSS (wstunnel + Caddy)
   find-reality-domain.sh  поиск домена для маскировки в том же AS
 clients/
   setup-desktop.sh        Mac / Ubuntu / Debian — sing-box с TUN
@@ -222,9 +223,139 @@ sudo systemctl restart sing-box
 | `Key is not the correct length` | WG-ключ сгенерирован через `xray x25519` — нужен `wg genkey` |
 | Медленная скорость | Попробуйте другой dest для Reality (microsoft.com, apple.com) |
 
+## Обфускация межсерверного хопа (WG-over-WSS)
+
+По умолчанию RU↔Foreign идёт по **голому WireGuard** (UDP/51820). DPI/ТСПУ умеет распознавать WireGuard по сигнатуре рукопожатия (фиксированные размеры пакетов 148/92 байта) и **точечно блокировать exit-IP** зарубежного VPS. Симптом: туннель работал месяцами и внезапно замолчал в обратную сторону — на RU перестают приходить пакеты от Foreign (`latest handshake` не обновляется, `wg show` показывает рост только `sent`).
+
+Решение — завернуть WG-трафик между серверами в **TLS/WebSocket** через [`wstunnel`](https://github.com/erebe/wstunnel), спрятав его за уже стоящий на Foreign VPS **Caddy** с реальным доменом. На проводе RU→Foreign выглядит как обычный визит на сайт по HTTPS — WG-сигнатуры нет, IP не палится.
+
+```
+RU: WG (127.0.0.1:51821) ──▶ wstunnel client ──WSS/TLS :443──▶ Caddy (домен) ──▶ wstunnel server ──▶ WG (127.0.0.1:51820) :Foreign
+                                            обычный HTTPS для DPI
+```
+
+### Требования
+- На Foreign VPS: Caddy с валидным доменом и Let's Encrypt-сертом (`<DOMAIN> { reverse_proxy ... }`).
+- WG на Foreign слушает `0.0.0.0:51820` (как в `setup-foreign-vps.sh`).
+- `wstunnel` v10+ на обоих серверах (один Go-бинарь):
+  ```bash
+  V=10.6.2
+  curl -sL https://github.com/erebe/wstunnel/releases/download/v${V}/wstunnel_${V}_linux_amd64.tar.gz | tar xz
+  install -m755 wstunnel /usr/local/bin/wstunnel
+  ```
+
+### Установка (скрипт)
+
+Проще всего — скриптом `setup-obfuscation.sh` (сам ставит wstunnel и Caddy, генерит секрет, правит конфиги):
+
+```bash
+# 1) На зарубежном VPS (нужен домен с A-записью на этот VPS):
+sudo ./servers/setup-obfuscation.sh foreign     # выдаст домен + секретный путь
+
+# 2) На российском VPS (введите домен и секрет с шага 1):
+sudo ./servers/setup-obfuscation.sh ru
+#    если основной IP Foreign заблокирован — укажите резервный IP,
+#    домен зарезолвится в него через /etc/hosts
+
+# Откат на прямой WireGuard (на любом из серверов):
+sudo ./servers/setup-obfuscation.sh disable
+```
+
+Ниже — что именно делает скрипт (для ручной установки / понимания).
+
+### Вручную: Foreign VPS (сервер)
+
+```bash
+SECRET=$(openssl rand -hex 12)        # секретный путь = пароль для клиентов
+echo "$SECRET" > /root/.wstunnel-secret
+
+# 1) wstunnel server (локально, TLS терминирует Caddy)
+cat > /etc/systemd/system/wstunnel-server.service <<EOF
+[Unit]
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/usr/local/bin/wstunnel server ws://127.0.0.1:8080 --restrict-to 127.0.0.1:51820 --restrict-http-upgrade-path-prefix ${SECRET}
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable --now wstunnel-server
+
+# 2) Caddy: секретный путь -> wstunnel, остальное -> ваш app
+#   <DOMAIN> {
+#       @wstun path /<SECRET> /<SECRET>/*
+#       reverse_proxy @wstun 127.0.0.1:8080
+#       reverse_proxy 127.0.0.1:8000        # ваше приложение
+#   }
+caddy validate --config /etc/caddy/Caddyfile && systemctl reload caddy
+```
+
+### Вручную: RU VPS (клиент)
+
+```bash
+SECRET=<тот_же_SECRET_с_Foreign>
+
+# домен -> IP Foreign VPS (если публичный DNS указывает на заблокированный/другой IP)
+echo "<FOREIGN_IP> <DOMAIN>" >> /etc/hosts
+
+cat > /etc/systemd/system/wstunnel-client.service <<EOF
+[Unit]
+After=network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/usr/local/bin/wstunnel client -L udp://127.0.0.1:51821:127.0.0.1:51820?timeout_sec=0 --http-upgrade-path-prefix ${SECRET} wss://<DOMAIN>:443
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable --now wstunnel-client
+
+# WG endpoint -> локальный вход wstunnel
+sed -i 's#^Endpoint = .*#Endpoint = 127.0.0.1:51821#' /etc/wireguard/wg0.conf
+systemctl restart wg-quick@wg0
+
+# WG должен стартовать после wstunnel
+mkdir -p /etc/systemd/system/wg-quick@wg0.service.d
+printf '[Unit]\nAfter=wstunnel-client.service\nWants=wstunnel-client.service\n' \
+  > /etc/systemd/system/wg-quick@wg0.service.d/10-after-wstunnel.conf
+systemctl daemon-reload
+```
+
+### Проверка обфускации
+
+```bash
+# RU: handshake свежий + трафик ходит
+wg show wg0                              # endpoint = 127.0.0.1:51821, latest handshake < 30s
+ping -c3 -I wg0 1.1.1.1                  # 0% loss
+curl -4 --interface wg0 ifconfig.me     # IP зарубежного VPS
+
+# Foreign: на проводе от RU — только TLS/443, НЕ udp/51820
+tcpdump -ni any host <RU_IP> and tcp port 443 -c 5     # видно TLS
+tcpdump -ni any host <RU_IP> and udp port 51820 -c 3   # должно быть пусто
+```
+
+### Клиентов это НЕ касается
+
+Плечо **клиент → RU** (VLESS/Reality :443) не меняется. Конфиги sing-box / v2rayNG / роутеров остаются прежними — обфускация только между серверами.
+
+### Диагностика блокировки exit-IP
+
+Если Foreign VPS точечно заблокировали (не помогает даже смена WG-порта — блок по сигнатуре/IP, а не по порту):
+
+```bash
+# С RU: доходит ли форвард до Foreign? (на Foreign — tcpdump)
+# С Foreign: EU -> наш RU vs EU -> Yandex/VK (если Яндекс доступен, а наш RU нет — режут пару IP)
+```
+
+Быстрое лечение — **новый IP на Foreign VPS** (DO Reserved IP из другого диапазона): DO NAT-ит входящие на reserved IP так, что ответы уходят с него же, поэтому достаточно перенаправить `Endpoint` на новый IP. Долгое лечение — обфускация выше, чтобы IP не палили по WG-сигнатуре.
+
 ## Безопасность
 
 - Данные подключения хранятся в `/root/vpn-credentials.txt` (chmod 600)
 - Не передавайте Private Key по открытым каналам
+- Секретный путь wstunnel (`/root/.wstunnel-secret`) — это пароль: не коммитьте его, при утечке перегенерируйте на обоих серверах
 - Обновляйте XRay: `bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`
 - Обновляйте sing-box: `brew upgrade sing-box` (Mac) / скачайте новую версию с [GitHub](https://github.com/SagerNet/sing-box/releases)
