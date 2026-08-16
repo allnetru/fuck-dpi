@@ -52,6 +52,22 @@ RU_LOCAL_PORT="51821"               # локальный вход wstunnel-clien
 [[ -f "$PARAMS_FILE" ]] && source "$PARAMS_FILE" || true
 
 # =====================================================================
+# Перезапуск wg0 через systemd
+#
+# setup-ru-vps.sh поднимает интерфейс вручную (`wg-quick up wg0`) и только
+# потом делает `systemctl enable`. systemd при этом считает юнит неактивным:
+# `systemctl restart` пропускает ExecStop и сразу идёт в ExecStart, а тот
+# упирается в проверку самого wg-quick «`wg0' already exists» и падает.
+# Поэтому сносим интерфейс явно, и только затем стартуем юнит.
+# =====================================================================
+wg_restart() {
+    systemctl stop wg-quick@wg0 2>/dev/null || true
+    wg-quick down wg0 2>/dev/null || true
+    ip link delete wg0 2>/dev/null || true
+    systemctl start wg-quick@wg0
+}
+
+# =====================================================================
 # Установка wstunnel (один Go-бинарь, все арх.)
 # =====================================================================
 install_wstunnel() {
@@ -100,6 +116,13 @@ install_caddy() {
 
 # =====================================================================
 # Caddy: добавить маршрут секретного пути -> wstunnel в блок домена
+#
+# ВАЖНО про порядок: Caddy выполняет директивы не в порядке написания, а по
+# фиксированному default order, где `respond` идёт РАНЬШЕ `reverse_proxy`.
+# Голый `reverse_proxy @wstun` в блоке с безматчерным `respond` никогда не
+# получит запрос — WebSocket-upgrade отдаёт 200 вместо 101, и туннель не
+# поднимается. Поэтому маршрут заворачиваем в `handle`: эта группа стоит выше
+# и обоих, а блоки `handle` взаимоисключающие и идут в порядке написания.
 # =====================================================================
 configure_caddy_route() {
     local domain="$1" secret="$2"
@@ -108,7 +131,12 @@ configure_caddy_route() {
     touch "$cf"
 
     if grep -qE "wstunnel-obfuscation|@wstun|127.0.0.1:${WS_LOCAL_PORT}" "$cf"; then
-        log "Маршрут wstunnel в Caddyfile уже есть — пропускаю"
+        if grep -qE "^[[:space:]]*reverse_proxy[[:space:]]+@wstun" "$cf"; then
+            warn "В Caddyfile старый (сломанный) вид маршрута: reverse_proxy @wstun"
+            warn "Его перекрывает respond — заверните вручную в handle @wstun { ... }"
+        else
+            log "Маршрут wstunnel в Caddyfile уже есть — пропускаю"
+        fi
         return
     fi
 
@@ -121,7 +149,9 @@ configure_caddy_route() {
         if [[ $inserted -eq 0 && "$line" == *"$domain"* && "$line" == *"{" ]]; then
             printf '    # wstunnel-obfuscation (auto-added)\n'
             printf '    @wstun path /%s /%s/*\n' "$secret" "$secret"
-            printf '    reverse_proxy @wstun 127.0.0.1:%s\n' "$WS_LOCAL_PORT"
+            printf '    handle @wstun {\n'
+            printf '        reverse_proxy 127.0.0.1:%s\n' "$WS_LOCAL_PORT"
+            printf '    }\n'
             inserted=1
         fi
     done < "${cf}.bak.beforewstun" > "$cf"
@@ -133,8 +163,12 @@ configure_caddy_route() {
 ${domain} {
     # wstunnel-obfuscation (auto-added)
     @wstun path /${secret} /${secret}/*
-    reverse_proxy @wstun 127.0.0.1:${WS_LOCAL_PORT}
-    respond "OK" 200
+    handle @wstun {
+        reverse_proxy 127.0.0.1:${WS_LOCAL_PORT}
+    }
+    handle {
+        respond "OK" 200
+    }
 }
 EOF
     fi
@@ -281,8 +315,16 @@ EOF
     systemctl is-active --quiet wstunnel-client || { journalctl -u wstunnel-client -n 15 --no-pager; err "wstunnel-client не запустился"; }
     log "wstunnel-client активен (127.0.0.1:${RU_LOCAL_PORT} → wss://${DOMAIN})"
 
-    # Разворачиваем WG endpoint на локальный вход wstunnel
-    cp /etc/wireguard/wg0.conf /etc/wireguard/wg0.conf.bak.pre-obfs
+    # Разворачиваем WG endpoint на локальный вход wstunnel.
+    # Бэкап только если его ещё нет: на повторном прогоне в wg0.conf уже лежит
+    # Endpoint = 127.0.0.1:RU_LOCAL_PORT, и безусловный cp затёр бы им исходный
+    # адрес Foreign — откат перестал бы откатывать.
+    if [[ ! -f /etc/wireguard/wg0.conf.bak.pre-obfs ]]; then
+        cp /etc/wireguard/wg0.conf /etc/wireguard/wg0.conf.bak.pre-obfs
+        log "Сохранён бэкап прямого WG: /etc/wireguard/wg0.conf.bak.pre-obfs"
+    else
+        log "Бэкап прямого WG уже есть — не перезаписываю"
+    fi
     sed -i "s#^Endpoint = .*#Endpoint = 127.0.0.1:${RU_LOCAL_PORT}#" /etc/wireguard/wg0.conf
 
     # WG стартует после wstunnel-client
@@ -293,7 +335,7 @@ After=wstunnel-client.service
 Wants=wstunnel-client.service
 EOF
     systemctl daemon-reload
-    systemctl restart wg-quick@wg0
+    wg_restart
 
     # Проверка
     for i in 1 2 3; do ping -c1 -W3 -I wg0 1.1.1.1 >/dev/null 2>&1 || true; sleep 1; done
@@ -307,7 +349,7 @@ EOF
     else
         warn "Handshake не поднялся через wstunnel — откатываю на прямой WG"
         cp /etc/wireguard/wg0.conf.bak.pre-obfs /etc/wireguard/wg0.conf
-        systemctl restart wg-quick@wg0
+        wg_restart || true
         err "Не удалось поднять туннель. Проверьте: journalctl -u wstunnel-client -n 30; и что домен резолвится в достижимый IP зарубежного VPS."
     fi
 
@@ -338,7 +380,7 @@ disable_obfuscation() {
             warn "Бэкап wg0.conf.bak.pre-obfs не найден — верните Endpoint вручную"
         fi
         systemctl daemon-reload
-        systemctl restart wg-quick@wg0 2>/dev/null || true
+        wg_restart || true
         log "RU: wstunnel-client отключён"
         did=1
     fi
