@@ -1,0 +1,8 @@
+# Секреты и локальные конфиги — НЕ коммитить
+.env
+singbox.txt
+.vpn-params
+*.vpn-params
+*.key
+vpn-credentials.txt
+.wstunnel-secret

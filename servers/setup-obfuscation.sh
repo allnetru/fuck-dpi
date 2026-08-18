@@ -68,6 +68,65 @@ wg_restart() {
 }
 
 # =====================================================================
+# Watchdog (RU): самовосстановление туннеля
+#
+# `Restart=always` не спасает — при сетевом блипе процесс wstunnel остаётся
+# «active», но WSS-сессия мертва и сама не переподнимается → WG-handshake
+# зависает и туннель молча умирает. Watchdog раз в 30с смотрит возраст
+# handshake и, если он старше порога (150с), перезапускает wstunnel-client + WG.
+# =====================================================================
+install_watchdog() {
+    cat > /usr/local/bin/wg-watchdog.sh << "EOS"
+#!/usr/bin/env bash
+set -u
+IFACE=wg0
+THRESHOLD=${WG_WATCHDOG_THRESHOLD:-150}
+hs=$(wg show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+[[ -z "${hs:-}" ]] && hs=0
+age=$(( $(date +%s) - hs ))
+if (( age > THRESHOLD )); then
+    logger -t wg-watchdog "handshake stale ${age}s (>${THRESHOLD}) — healing tunnel"
+    systemctl restart wstunnel-client
+    sleep 2
+    systemctl stop wg-quick@${IFACE} 2>/dev/null || true
+    wg-quick down ${IFACE} 2>/dev/null || true
+    ip link delete ${IFACE} 2>/dev/null || true
+    systemctl start wg-quick@${IFACE}
+    for i in 1 2 3; do ping -c1 -W2 -I ${IFACE} 1.1.1.1 >/dev/null 2>&1 || true; sleep 1; done
+    newhs=$(wg show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+    logger -t wg-watchdog "post-heal handshake age: $(( $(date +%s) - ${newhs:-0} ))s"
+fi
+EOS
+    chmod +x /usr/local/bin/wg-watchdog.sh
+
+    cat > /etc/systemd/system/wg-watchdog.service << EOF
+[Unit]
+Description=WireGuard-over-wstunnel watchdog (heals stale tunnel)
+After=wg-quick@wg0.service wstunnel-client.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wg-watchdog.sh
+EOF
+
+    cat > /etc/systemd/system/wg-watchdog.timer << EOF
+[Unit]
+Description=Run WG tunnel watchdog periodically
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=30
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now wg-watchdog.timer >/dev/null 2>&1
+    log "Watchdog установлен (проверка каждые 30с, порог 150с)"
+}
+
+# =====================================================================
 # Установка wstunnel (один Go-бинарь, все арх.)
 # =====================================================================
 install_wstunnel() {
@@ -301,7 +360,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/wstunnel client -L udp://127.0.0.1:${RU_LOCAL_PORT}:127.0.0.1:${foreign_port}?timeout_sec=0 --http-upgrade-path-prefix ${SECRET} wss://${DOMAIN}:443
+ExecStart=/usr/local/bin/wstunnel client -L udp://127.0.0.1:${RU_LOCAL_PORT}:127.0.0.1:${foreign_port}?timeout_sec=30 --websocket-ping-frequency 25s --http-upgrade-path-prefix ${SECRET} wss://${DOMAIN}:443
 Restart=always
 RestartSec=3
 
@@ -353,6 +412,9 @@ EOF
         err "Не удалось поднять туннель. Проверьте: journalctl -u wstunnel-client -n 30; и что домен резолвится в достижимый IP зарубежного VPS."
     fi
 
+    # Watchdog: самовосстановление при зависании WSS
+    install_watchdog
+
     echo ""
     log "Готово. На проводе RU→Foreign теперь только TLS/443 (проверка):"
     echo -e "  ${CYAN}tcpdump -ni any host <FOREIGN_IP> and udp port ${foreign_port}${NC}  # должно быть пусто"
@@ -370,6 +432,8 @@ disable_obfuscation() {
 
     # RU-сторона
     if [[ -f /etc/systemd/system/wstunnel-client.service ]]; then
+        systemctl disable --now wg-watchdog.timer 2>/dev/null || true
+        rm -f /etc/systemd/system/wg-watchdog.timer /etc/systemd/system/wg-watchdog.service /usr/local/bin/wg-watchdog.sh
         systemctl disable --now wstunnel-client 2>/dev/null || true
         rm -f /etc/systemd/system/wstunnel-client.service
         rm -f /etc/systemd/system/wg-quick@wg0.service.d/10-after-wstunnel.conf
