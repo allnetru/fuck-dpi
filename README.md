@@ -305,7 +305,7 @@ cat > /etc/systemd/system/wstunnel-client.service <<EOF
 After=network-online.target
 Wants=network-online.target
 [Service]
-ExecStart=/usr/local/bin/wstunnel client -L udp://127.0.0.1:51821:127.0.0.1:51820?timeout_sec=0 --http-upgrade-path-prefix ${SECRET} wss://<DOMAIN>:443
+ExecStart=/usr/local/bin/wstunnel client -L udp://127.0.0.1:51821:127.0.0.1:51820?timeout_sec=30 --websocket-ping-frequency 25s --http-upgrade-path-prefix ${SECRET} wss://<DOMAIN>:443
 Restart=always
 RestartSec=3
 [Install]
@@ -323,6 +323,44 @@ printf '[Unit]\nAfter=wstunnel-client.service\nWants=wstunnel-client.service\n' 
   > /etc/systemd/system/wg-quick@wg0.service.d/10-after-wstunnel.conf
 systemctl daemon-reload
 ```
+
+### Watchdog (RU): самовосстановление туннеля
+
+`Restart=always` не спасает от «тихой» смерти: при сетевом блипе процесс wstunnel
+остаётся `active`, но WSS-сессия мертва и сама не переподнимается — WG-handshake
+зависает, туннель молча умирает (симптом: сервисы `active`, но `ping -I wg0` не идёт
+и `latest handshake` растёт). `--websocket-ping-frequency` ускоряет детект, но
+надёжная страховка — watchdog: раз в 30с проверяет возраст handshake и при
+зависании (>150с) перезапускает `wstunnel-client` + WG.
+
+```bash
+cat > /usr/local/bin/wg-watchdog.sh <<'EOS'
+#!/usr/bin/env bash
+set -u
+IFACE=wg0; THRESHOLD=${WG_WATCHDOG_THRESHOLD:-150}
+hs=$(wg show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+[[ -z "${hs:-}" ]] && hs=0
+age=$(( $(date +%s) - hs ))
+if (( age > THRESHOLD )); then
+    logger -t wg-watchdog "handshake stale ${age}s — healing"
+    systemctl restart wstunnel-client; sleep 2
+    systemctl stop wg-quick@${IFACE} 2>/dev/null||true
+    wg-quick down ${IFACE} 2>/dev/null||true; ip link delete ${IFACE} 2>/dev/null||true
+    systemctl start wg-quick@${IFACE}
+    for i in 1 2 3; do ping -c1 -W2 -I ${IFACE} 1.1.1.1 >/dev/null 2>&1||true; sleep 1; done
+fi
+EOS
+chmod +x /usr/local/bin/wg-watchdog.sh
+
+printf '[Unit]\nDescription=WG-over-wstunnel watchdog\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/wg-watchdog.sh\n' \
+  > /etc/systemd/system/wg-watchdog.service
+printf '[Unit]\nDescription=WG tunnel watchdog\n[Timer]\nOnBootSec=90\nOnUnitActiveSec=30\n[Install]\nWantedBy=timers.target\n' \
+  > /etc/systemd/system/wg-watchdog.timer
+systemctl daemon-reload && systemctl enable --now wg-watchdog.timer
+```
+
+`setup-obfuscation.sh ru` ставит watchdog автоматически. Проверить его работу:
+`sudo systemctl stop wstunnel-client && sudo WG_WATCHDOG_THRESHOLD=1 /usr/local/bin/wg-watchdog.sh` — туннель должен подняться заново.
 
 ### Проверка обфускации
 
